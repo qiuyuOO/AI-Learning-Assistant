@@ -1,0 +1,22 @@
+{
+  "name": "jev-frontend",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Jev AI 研究助手 —— Web 前端（React + Vite）",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-markdown": "^9.0.1",
+    "remark-gfm": "^4.0.0"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.3.4",
+    "vite": "^5.4.11"
+  }
+}
