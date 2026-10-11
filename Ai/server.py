@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import logging
 import os
+from contextlib import asynccontextmanager
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
@@ -31,6 +32,7 @@ from memory import (Interaction, get_default_manager, now_iso,
                     render_memory_context)
 from session_store import get_default_session_store
 from tool_types import Session
+from tools.tool_registry import bootstrap_mcp, shutdown_mcp
 
 load_dotenv()
 
@@ -56,7 +58,40 @@ _manager = get_default_manager(
 )
 _store = get_default_session_store()
 
-app = FastAPI(title="Agent API", version="1.0.0")
+ZHIHU_MCP_URL = "https://developer.zhihu.com/api/mcp/v1"
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """应用生命周期：启动时注册 MCP 工具（一次，失败降级），关闭时清理资源。
+
+    ★ 为什么放 lifespan 而不是模块级：MCPClient.connect 会开后台线程、走网络，
+      放 import 期副作用太大（--reload / TestClient 一 import 就联网）。
+      lifespan 精确绑定应用启停，是连接类资源的正确挂载点。
+    ★ 降级：知乎挂了或没配 ZHIHU_API_KEY，也要能把服务起起来（仅本地工具），
+      绝不能让整个后端启动失败。
+    """
+    # ---- startup ----
+    try:
+        n = bootstrap_mcp(ZHIHU_MCP_URL, os.getenv("ZHIHU_API_KEY"))
+        log.info("MCP 工具已注册 %d 个", n)
+    except Exception:  # noqa: BLE001 —— 降级为仅本地工具
+        log.exception("MCP 初始化失败，降级为仅本地工具启动")
+
+    yield
+
+    # ---- shutdown ----
+    try:
+        shutdown_mcp()
+    except Exception:  # noqa: BLE001
+        log.exception("关闭 MCP 时出错（忽略）")
+    try:
+        _manager.close()
+    except Exception:  # noqa: BLE001
+        log.exception("关闭记忆 manager 时出错（忽略）")
+
+
+app = FastAPI(title="Agent API", version="1.0.0", lifespan=lifespan)
 
 # 允许 Vite 开发服务器跨域访问（默认 5173，可用环境变量追加）
 _CORS_ORIGINS = [o.strip() for o in os.getenv(
@@ -230,15 +265,6 @@ def remember(body: RememberIn) -> dict:
         "changes": [c.model_dump(mode="json") for c in output.changes],
         "message": f"已记住，共 {len(output.changes)} 条变更",
     }
-
-
-@app.on_event("shutdown")
-def _shutdown() -> None:
-    """进程退出前，等后台记忆更新落盘。"""
-    try:
-        _manager.close()
-    except Exception:  # noqa: BLE001
-        log.exception("关闭记忆 manager 时出错（忽略）")
 
 
 if __name__ == "__main__":

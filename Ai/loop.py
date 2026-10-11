@@ -9,7 +9,7 @@ from llm_client import LLMClient
 from llm_types import (Message, Role, TextPart, user_message,
                        assistant_message, StopReason, tool_message)
 from tool_types import Session, ToolResult
-from tools.tool_registry import build_tools, execute
+from tools.tool_registry import build_tools, execute, bootstrap_mcp, shutdown_mcp
 from error_type import ContextLengthExceeded, DomainError
 from memory import Interaction, render_memory_context, now_iso
 
@@ -314,6 +314,13 @@ if __name__ == "__main__":
         print(f"新会话 {handle.session_id}")
         rest = argv
 
+    # ---- 启动时注册 MCP 工具（一次；失败则降级为仅本地工具，不阻断 CLI）----
+    try:
+        n = bootstrap_mcp()
+        print(f"[MCP] 已注册 {n} 个远程工具")
+    except Exception as e:  # noqa: BLE001
+        print(f"[MCP] 初始化失败，降级为仅本地工具：{type(e).__name__}: {e}")
+
     # ★ 运行期身份带上会话 id：和持久化用的 handle.session_id 是同一个值。
     #   这样 session_store 按 session_id 分目录、Session 也按 session_id 区分，
     #   两套标识不再断开 —— 记忆 Interaction / 日志都能追溯到"具体哪一次对话"。
@@ -357,4 +364,6 @@ if __name__ == "__main__":
     print(f"会话已保存：{handle.session_id}（共 {handle.turn_count} 轮）")
     # ★ 退出前等后台记忆更新落盘（攒批 flush / 显式 remember 都走这个线程池）
     manager.close()
+    # ★ 关闭 MCP 连接与后台 loop（handler 闭包持有的那个全局 client）
+    shutdown_mcp()
     

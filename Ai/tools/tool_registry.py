@@ -4,6 +4,7 @@
   loop 只认三个东西：build_tools / execute / ToolResult。
 """
 import logging
+import os
 from typing import Any
 
 from llm_types import ToolSpec
@@ -13,6 +14,7 @@ from tools.Search_for_articles.huggingface_rss import HUGGINGFACE_RSS_TOOL
 from tools.Search_for_articles.openai_rss import OPENAI_RSS_TOOL
 from tools.Search_for_articles.arxiv import ARXIV_RSS_TOOL
 from tools.remember_preference import REMEMBER_PREFERENCE_TOOL
+from MCP.mcpclient import MCPClient
 
 log = logging.getLogger("tool_registry")
 
@@ -26,7 +28,46 @@ ALL_TOOLS: list[Tool] = [
     ARXIV_RSS_TOOL,
     REMEMBER_PREFERENCE_TOOL,
 ]
+ZHIHU_MCP_URL = "https://developer.zhihu.com/api/mcp/v1"
 
+# ★ 模块级持有 MCPClient：工具 handler 靠闭包 self 用它的连接发调用，
+#   它的生命周期必须覆盖整个进程；shutdown 时也靠这个引用去 close。
+_mcp_client: "MCPClient | None" = None
+
+
+def register_mcp_tools(tools: list[Tool]) -> None:
+    """把 MCP 工具追加到 ALL_TOOLS 末尾（低层原语）。"""
+    ALL_TOOLS.extend(tools)     # ★ extend 不是 append；追加末尾保持本地工具前缀不变（缓存稳定）
+
+
+def bootstrap_mcp(url: str = ZHIHU_MCP_URL, secret: str | None = None) -> int:
+    """启动时调一次：建全局 MCPClient → connect → 把工具注册进 ALL_TOOLS。
+
+    ★ 幂等：已初始化则直接返回 0，避免重复连接 / 重复 extend 出重复工具。
+    ★ secret 缺省从环境变量 ZHIHU_API_KEY 读；调用方也可显式传。
+    ★ 连接失败会向上抛异常 —— 由调用方（loop / server）决定"降级为仅本地工具"，
+      本函数不吞异常，好让入口能记录真实原因。
+    返回本次注册的工具数量。
+    """
+    global _mcp_client
+    if _mcp_client is not None:
+        return 0
+    if secret is None:
+        secret = os.getenv("ZHIHU_API_KEY")
+    client = MCPClient()
+    client.connect(url, secret)
+    tools = client.get_tools()
+    register_mcp_tools(tools)
+    _mcp_client = client          # 留住引用：handler 要用它的连接，shutdown 要 close 它
+    return len(tools)
+
+
+def shutdown_mcp() -> None:
+    """退出时调一次：关闭 MCP 连接与后台 loop，并释放引用。"""
+    global _mcp_client
+    if _mcp_client is not None:
+        _mcp_client.close()
+        _mcp_client = None
 
 def build_tools(role: str) -> list[ToolSpec]:
     """返回该角色可见的工具声明，直接喂给 client.chat(tools=...)。
